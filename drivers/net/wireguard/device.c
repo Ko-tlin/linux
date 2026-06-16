@@ -150,7 +150,7 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto err;
 	}
 
-	peer = wg_allowedips_lookup_dst(&wg->peer_allowedips, skb);
+	peer = wg->allowedips_lookup_dst(&wg->peer_allowedips, skb);
 	if (unlikely(!peer)) {
 		ret = -ENOKEY;
 		if (skb->protocol == htons(ETH_P_IP))
@@ -239,6 +239,14 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_start_xmit		= wg_xmit,
 };
 
+static const struct net_device_ops l2netdev_ops = {
+	.ndo_open		= wg_open,
+	.ndo_stop		= wg_stop,
+	.ndo_start_xmit		= wg_xmit,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr
+};
+
 static void wg_destruct(struct net_device *dev)
 {
 	struct wg_device *wg = netdev_priv(dev);
@@ -305,6 +313,49 @@ static void wg_setup(struct net_device *dev)
 	netif_set_tso_max_size(dev, GSO_MAX_SIZE);
 
 	wg->dev = dev;
+	wg->l2 = false;
+	wg->allowedips_lookup_src = wg_allowedips_lookup_src;
+	wg->allowedips_lookup_dst = wg_allowedips_lookup_dst;
+	wg->check_packet_length = wg_check_packet_length;
+	wg->get_packet_length = wg_get_packet_length;
+}
+
+static void l2wg_setup(struct net_device *dev)
+{
+	struct wg_device *wg = netdev_priv(dev);
+	enum { WG_NETDEV_FEATURES = NETIF_F_HW_CSUM | NETIF_F_RXCSUM |
+				    NETIF_F_SG | NETIF_F_GSO |
+				    NETIF_F_GSO_SOFTWARE | NETIF_F_HIGHDMA };
+	const int overhead = MESSAGE_MINIMUM_LENGTH + sizeof(struct udphdr) +
+			     max(sizeof(struct ipv6hdr), sizeof(struct iphdr)) + ETH_HLEN;
+
+	dev->netdev_ops = &l2netdev_ops;
+	dev->header_ops = &ip_tunnel_header_ops;
+	ether_setup(dev);
+	dev->needed_headroom = DATA_PACKET_HEAD_ROOM;
+	dev->needed_tailroom = noise_encrypted_len(MESSAGE_PADDING_MULTIPLE);
+	dev->priv_flags |= IFF_NO_QUEUE;
+	dev->lltx = true;
+	dev->features |= WG_NETDEV_FEATURES;
+	dev->hw_features |= WG_NETDEV_FEATURES;
+	dev->hw_enc_features |= WG_NETDEV_FEATURES;
+	dev->mtu = ETH_DATA_LEN - overhead;
+	dev->max_mtu = round_down(INT_MAX, MESSAGE_PADDING_MULTIPLE) - overhead;
+	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
+
+	SET_NETDEV_DEVTYPE(dev, &device_type);
+
+	/* We need to keep the dst around in case of icmp replies. */
+	netif_keep_dst(dev);
+
+	netif_set_tso_max_size(dev, GSO_MAX_SIZE);
+
+	wg->dev = dev;
+	wg->l2 = true;
+	wg->allowedips_lookup_src = l2wg_allowedips_lookup_src;
+	wg->allowedips_lookup_dst = l2wg_allowedips_lookup_dst;
+	wg->check_packet_length = l2wg_check_packet_length;
+	wg->get_packet_length = l2wg_get_packet_length;
 }
 
 static int wg_newlink(struct net_device *dev,
@@ -411,6 +462,13 @@ static struct rtnl_link_ops link_ops __read_mostly = {
 	.newlink		= wg_newlink,
 };
 
+static struct rtnl_link_ops l2link_ops __read_mostly = {
+	.kind			= "l2" KBUILD_MODNAME,
+	.priv_size		= sizeof(struct wg_device),
+	.setup			= l2wg_setup,
+	.newlink		= wg_newlink,
+};
+
 static void __net_exit wg_netns_exit_rtnl(struct net *net, struct list_head *dev_kill_list)
 {
 	struct wg_device *wg;
@@ -453,11 +511,16 @@ int __init wg_device_init(void)
 	ret = rtnl_link_register(&link_ops);
 	if (ret)
 		goto error_pernet;
+	ret = rtnl_link_register(&l2link_ops);
+	if (ret)
+		goto error_pernet_l2;
 
 	return 0;
 
 error_pernet:
 	unregister_pernet_device(&pernet_ops);
+error_pernet_l2:
+	rtnl_link_unregister(&link_ops);
 error_vm:
 	unregister_random_vmfork_notifier(&vm_notifier);
 error_pm:
@@ -468,6 +531,7 @@ error_pm:
 void wg_device_uninit(void)
 {
 	rtnl_link_unregister(&link_ops);
+	rtnl_link_unregister(&l2link_ops);
 	unregister_pernet_device(&pernet_ops);
 	unregister_random_vmfork_notifier(&vm_notifier);
 	unregister_pm_notifier(&pm_notifier);

@@ -399,6 +399,18 @@ struct wg_peer *wg_allowedips_lookup_dst(struct allowedips *table,
 }
 
 /* Returns a strong reference to a peer */
+struct wg_peer *l2wg_allowedips_lookup_dst(struct allowedips *table,
+					 struct sk_buff *skb)
+{
+	static const __be16 dummy = 0;
+	if (skb->protocol == htons(ETH_P_IP))
+		return lookup(table->root4, 32, &ip_hdr(skb)->daddr);
+	else if (skb->protocol == htons(ETH_P_IPV6))
+		return lookup(table->root6, 128, &ipv6_hdr(skb)->daddr);
+	return lookup(table->root4, 32, &dummy);
+}
+
+/* Returns a strong reference to a peer */
 struct wg_peer *wg_allowedips_lookup_src(struct allowedips *table,
 					 struct sk_buff *skb)
 {
@@ -407,6 +419,18 @@ struct wg_peer *wg_allowedips_lookup_src(struct allowedips *table,
 	else if (skb->protocol == htons(ETH_P_IPV6))
 		return lookup(table->root6, 128, &ipv6_hdr(skb)->saddr);
 	return NULL;
+}
+
+/* Returns a strong reference to a peer */
+struct wg_peer *l2wg_allowedips_lookup_src(struct allowedips *table,
+					 struct sk_buff *skb)
+{
+	static const __be16 dummy = 0;
+	if (skb->protocol == htons(ETH_P_IP))
+		return lookup(table->root4, 32, &ip_hdr(skb)->saddr);
+	else if (skb->protocol == htons(ETH_P_IPV6))
+		return lookup(table->root6, 128, &ipv6_hdr(skb)->saddr);
+	return lookup(table->root4, 32, &dummy);
 }
 
 int __init wg_allowedips_slab_init(void)
